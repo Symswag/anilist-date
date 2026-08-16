@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AniList Date
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  Enregistre la date du dernier visionnage / revisionnage sur une base de donne supabase
 // @author       Symswag
 // @match        *://*.crunchyroll.com/*
@@ -207,12 +207,53 @@
                 return;
             }
 
-            // 4. Upsert Supabase
-            const supabasePayload = filteredActivities.map(act => ({
-                media_id: act.media.id,
-                completed_at: new Date(act.createdAt * 1000).toISOString()
-            }));
+            // 4. VÉRIFICATION DANS SUPABASE : Récupérer les dates actuelles
+            const mediaIds = filteredActivities.map(act => act.media.id).join(',');
+            let existingData = [];
 
+            const checkRes = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE_NAME}?media_id=in.(${mediaIds})&select=media_id,completed_at`, {
+                method: 'GET',
+                headers: {
+                    'apikey': SUPABASE_ANON_KEY,
+                    'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+                }
+            });
+
+            if (checkRes.ok) {
+                existingData = await checkRes.json();
+            }
+
+            // Création d'un dictionnaire pour un accès rapide aux dates existantes (en millisecondes)
+            const existingDatesMap = {};
+            existingData.forEach(row => {
+                existingDatesMap[row.media_id] = new Date(row.completed_at).getTime();
+            });
+
+            // 5. Comparaison des dates et préparation du payload final
+            const supabasePayload = [];
+            filteredActivities.forEach(act => {
+                const newDateObj = new Date(act.createdAt * 1000);
+                const newTime = newDateObj.getTime();
+                const existingTime = existingDatesMap[act.media.id];
+
+                // On ajoute au payload SEULEMENT SI :
+                // - L'anime n'est pas encore dans Supabase (!existingTime)
+                // - OU la nouvelle date AniList est strictement supérieure à celle de Supabase (newTime > existingTime)
+                if (!existingTime || newTime > existingTime) {
+                    supabasePayload.push({
+                        media_id: act.media.id,
+                        completed_at: newDateObj.toISOString()
+                    });
+                }
+            });
+
+            // Si aucune nouvelle date n'est plus récente, on annule l'envoi
+            if (supabasePayload.length === 0) {
+                console.log("ℹ️ Supabase check: Les dates dans la base sont déjà à jour, rien à envoyer.");
+                return;
+            }
+
+            // 6. Upsert Supabase (uniquement avec les données filtrées plus récentes)
             const supabaseRes = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE_NAME}`, {
                 method: 'POST',
                 headers: {
@@ -226,7 +267,7 @@
 
             if (!supabaseRes.ok) throw new Error('Erreur Supabase');
 
-            console.log("✅ Supabase Sync OK :", supabasePayload);
+            console.log("✅ Supabase Sync OK (Dates mises à jour) :", supabasePayload);
 
         } catch (error) {
             console.error("❌ Erreur de synchronisation :", error);
